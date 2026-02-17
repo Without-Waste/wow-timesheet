@@ -4,7 +4,7 @@
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => Array.from(document.querySelectorAll(s));
 
-  // UI bits
+  // UI
   const statusText = $("#statusText");
   const offlineBanner = $("#offlineBanner");
 
@@ -25,8 +25,10 @@
   const nameList = $("#nameList");
   const eventList = $("#eventList");
   const btnStartShift = $("#btnStartShift");
-  const btnResumeActive = $("#btnResumeActive");
 
+  const activeShiftListHome = $("#activeShiftListHome");
+
+  // Active shift (manage one selected shift at a time)
   const activeSummary = $("#activeSummary");
   const breakType = $("#breakType");
   const btnStartBreak = $("#btnStartBreak");
@@ -105,19 +107,17 @@
     setTimeout(()=>URL.revokeObjectURL(url), 800);
   }
 
-  // ---------- PWA offline ----------
+  // PWA offline
   if("serviceWorker" in navigator){
     navigator.serviceWorker.register("./service-worker.js").catch(()=>{});
   }
-  function updateOfflineBanner(){
-    offlineBanner.hidden = navigator.onLine;
-  }
+  function updateOfflineBanner(){ offlineBanner.hidden = navigator.onLine; }
   window.addEventListener("online", updateOfflineBanner);
   window.addEventListener("offline", updateOfflineBanner);
 
-  // ---------- IndexedDB ----------
+  // IndexedDB
   const DB_NAME="wow_timesheets_db";
-  const DB_VERSION=1;
+  const DB_VERSION=2; // bumped for drafts meta key
   let db=null;
 
   function openDb(){
@@ -125,14 +125,28 @@
       const req=indexedDB.open(DB_NAME, DB_VERSION);
       req.onupgradeneeded=(e)=>{
         const d=e.target.result;
-        const shifts=d.createObjectStore("shifts",{keyPath:"id"});
-        shifts.createIndex("byCreatedAt","createdAt",{unique:false});
-        const breaks=d.createObjectStore("breaks",{keyPath:"id"});
-        breaks.createIndex("byShiftId","shiftId",{unique:false});
-        const meta=d.createObjectStore("meta",{keyPath:"key"});
-        meta.put({key:"activeShift", value:null});
-        d.createObjectStore("names",{keyPath:"value"});
-        d.createObjectStore("events",{keyPath:"value"});
+        if(!d.objectStoreNames.contains("shifts")){
+          const shifts=d.createObjectStore("shifts",{keyPath:"id"});
+          shifts.createIndex("byCreatedAt","createdAt",{unique:false});
+        }
+        if(!d.objectStoreNames.contains("breaks")){
+          const breaks=d.createObjectStore("breaks",{keyPath:"id"});
+          breaks.createIndex("byShiftId","shiftId",{unique:false});
+        }
+        if(!d.objectStoreNames.contains("meta")){
+          const meta=d.createObjectStore("meta",{keyPath:"key"});
+          meta.put({key:"drafts", value:{}});
+        }else{
+          const metaTx = e.target.transaction.objectStore("meta");
+          // Ensure drafts key exists
+          metaTx.get("drafts").onsuccess = (ev)=>{
+            if(!ev.target.result){
+              metaTx.put({key:"drafts", value:{}});
+            }
+          };
+        }
+        if(!d.objectStoreNames.contains("names")) d.createObjectStore("names",{keyPath:"value"});
+        if(!d.objectStoreNames.contains("events")) d.createObjectStore("events",{keyPath:"value"});
       };
       req.onsuccess=()=>resolve(req.result);
       req.onerror=()=>reject(req.error);
@@ -206,17 +220,25 @@
       t.onerror=()=>reject(t.error);
     });
   }
-  function wipeAll(){
+  async function wipeAll(){
     return new Promise((resolve,reject)=>{
       const t=tx(["shifts","breaks","meta","names","events"],"readwrite");
       for(const s of ["shifts","breaks","names","events"]){ t.objectStore(s).clear(); }
-      t.objectStore("meta").put({key:"activeShift", value:null});
+      t.objectStore("meta").put({key:"drafts", value:{}});
       t.oncomplete=()=>resolve(true);
       t.onerror=()=>reject(t.error);
     });
   }
 
-  // ---------- View nav ----------
+  // Drafts store (multiple active shifts)
+  async function getDrafts(){
+    return (await metaGet("drafts")) || {};
+  }
+  async function setDrafts(drafts){
+    await metaSet("drafts", drafts || {});
+  }
+
+  // Navigation
   function showView(name){
     Object.values(views).forEach(v=>v.hidden=true);
     views[name].hidden=false;
@@ -226,16 +248,17 @@
     b.addEventListener("click", async ()=>{
       const v=b.getAttribute("data-view");
       if(v==="history") await renderHistory();
-      if(v==="new") await loadActiveShiftBanner();
+      if(v==="new") await renderActiveHome();
       showView(v);
     });
   });
 
-  // ---------- Active shift state ----------
-  let activeShift=null;      // {id,event,date,name,startAt,endAtDraft,...}
-  let activeBreak=null;      // {id,type,startAt}
-  let breaksDraft=[];        // completed breaks in memory
-  let breakEditingId=null;   // for edit dialog
+  // Manage-selected active shift (loaded from drafts)
+  let currentDraftId = null;
+  let activeShift = null;
+  let activeBreak = null;
+  let breaksDraft = [];
+  let breakEditingId = null;
 
   function shiftSummaryHtml(s){
     const start=new Date(s.startAt);
@@ -278,59 +301,90 @@
       breakList.appendChild(div);
     }
 
-    // wire buttons
     $$("[data-edit-break]").forEach(btn=>{
-      btn.onclick=()=>{
-        const id=btn.getAttribute("data-edit-break");
-        openBreakEdit(id);
-      };
+      btn.onclick=()=>openBreakEdit(btn.getAttribute("data-edit-break"));
     });
     $$("[data-del-break]").forEach(btn=>{
       btn.onclick=()=>{
         const id=btn.getAttribute("data-del-break");
-        const b=breaksDraft.find(x=>x.id===id);
-        if(!b) return;
         if(confirm("Delete this break?")){
           breaksDraft = breaksDraft.filter(x=>x.id!==id);
-          persistActiveShift();
+          persistCurrentDraft();
           renderBreakList();
         }
       };
     });
   }
 
-  async function persistActiveShift(){
-    // Save draft state so you can resume after closing the app
-    if(!activeShift){
-      await metaSet("activeShift", null);
+  async function persistCurrentDraft(){
+    if(!currentDraftId) return;
+    const drafts = await getDrafts();
+    drafts[currentDraftId] = { activeShift, activeBreak, breaksDraft };
+    await setDrafts(drafts);
+  }
+
+  async function loadDraft(id){
+    const drafts = await getDrafts();
+    const d = drafts[id];
+    if(!d || !d.activeShift) return false;
+    currentDraftId = id;
+    activeShift = d.activeShift;
+    activeBreak = d.activeBreak;
+    breaksDraft = d.breaksDraft || [];
+    return true;
+  }
+
+  async function renderActiveHome(){
+    const drafts = await getDrafts();
+    const ids = Object.keys(drafts).sort((a,b)=>{
+      const ca = drafts[a]?.activeShift?.createdAt || 0;
+      const cb = drafts[b]?.activeShift?.createdAt || 0;
+      return cb - ca;
+    });
+
+    activeShiftListHome.innerHTML = "";
+    if(ids.length === 0){
+      activeShiftListHome.innerHTML = `<div class="note">No active shifts right now.</div>`;
       return;
     }
-    const draft = { activeShift, activeBreak, breaksDraft };
-    await metaSet("activeShift", draft);
-  }
 
-  async function loadActiveShiftBanner(){
-    const draft = await metaGet("activeShift");
-    if(draft && draft.activeShift){
-      btnResumeActive.hidden=false;
-      btnResumeActive.onclick=async ()=>{
-        activeShift = draft.activeShift;
-        activeBreak = draft.activeBreak;
-        breaksDraft = draft.breaksDraft || [];
+    for(const id of ids){
+      const s = drafts[id].activeShift;
+      if(!s) continue;
+      const div=document.createElement("div");
+      div.className="item";
+      div.innerHTML = `
+        <div class="meta">
+          <div class="title">${escapeHtml(s.name)} · ${escapeHtml(s.event)}</div>
+          <div class="sub">Started: ${formatNice(new Date(s.startAt))}</div>
+        </div>
+        <div class="actions-mini">
+          <button class="btn btn-secondary" data-manage="${id}" type="button">Manage</button>
+        </div>
+      `;
+      activeShiftListHome.appendChild(div);
+    }
+
+    $$("[data-manage]").forEach(btn=>{
+      btn.onclick = async ()=>{
+        const id = btn.getAttribute("data-manage");
+        const ok = await loadDraft(id);
+        if(!ok){ alert("That active shift could not be found."); await renderActiveHome(); return; }
         await showActiveShift();
       };
-    }else{
-      btnResumeActive.hidden=true;
-    }
+    });
   }
 
-  async function refreshAutocomplete(){
-    const [names, events] = await Promise.all([listValues("names"), listValues("events")]);
-    nameList.innerHTML = names.map(n=>`<option value="${escapeHtml(n)}"></option>`).join("");
-    eventList.innerHTML = events.map(e=>`<option value="${escapeHtml(e)}"></option>`).join("");
+  async function showActiveShift(){
+    activeSummary.innerHTML = shiftSummaryHtml(activeShift);
+    btnEndBreak.disabled = !activeBreak;
+    btnStartBreak.disabled = !!activeBreak;
+    renderBreakList();
+    showView("active");
+    setStatus("Managing active shift");
   }
 
-  // ---------- New shift ----------
+  // Start shift: adds a NEW draft (does not overwrite others)
   btnStartShift.addEventListener("click", async ()=>{
     const event = (eventInput.value||"").trim();
     const date = (dateInput.value||"").trim();
@@ -339,49 +393,62 @@
       alert("Please fill Event, Date, and Staff name.");
       return;
     }
+
     await upsertValue("events", event);
     await upsertValue("names", name);
     await refreshAutocomplete();
 
     const startAt = parseDTInputValue(startInput.value) || new Date();
-    activeShift = {
-      id: uuid(),
-      event,
-      date,
-      name,
-      startAt: startAt.getTime(),
-      endAtDraft: null,
-      signatureDataUrl: null,
-      createdAt: Date.now(),
+    const id = uuid();
+
+    const draft = {
+      activeShift: {
+        id,
+        event,
+        date,
+        name,
+        startAt: startAt.getTime(),
+        endAtDraft: null,
+        createdAt: Date.now(),
+      },
+      activeBreak: null,
+      breaksDraft: []
     };
-    activeBreak = null;
-    breaksDraft = [];
-    await persistActiveShift();
-    await showActiveShift();
+
+    const drafts = await getDrafts();
+    drafts[id] = draft;
+    await setDrafts(drafts);
+
+    // refresh home list and optionally jump into manage view for this shift
+    await renderActiveHome();
+    if(confirm("Shift started. Do you want to manage it now (breaks/end)?")){
+      await loadDraft(id);
+      await showActiveShift();
+    }else{
+      showView("new");
+      setStatus("Shift started");
+    }
   });
 
-  async function showActiveShift(){
-    activeSummary.innerHTML = shiftSummaryHtml(activeShift);
-    btnEndBreak.disabled = !activeBreak;
-    btnStartBreak.disabled = !!activeBreak;
-    renderBreakList();
-    showView("active");
-    setStatus("Active shift running");
+  async function refreshAutocomplete(){
+    const [names, events] = await Promise.all([listValues("names"), listValues("events")]);
+    nameList.innerHTML = names.map(n=>`<option value="${escapeHtml(n)}"></option>`).join("");
+    eventList.innerHTML = events.map(e=>`<option value="${escapeHtml(e)}"></option>`).join("");
   }
 
-  // ---------- Breaks ----------
+  // Breaks
   btnStartBreak.addEventListener("click", async ()=>{
-    if(!activeShift){ alert("No active shift."); return; }
+    if(!activeShift){ alert("No active shift loaded."); return; }
     if(activeBreak){ alert("A break is already running."); return; }
     activeBreak = { id: uuid(), type: breakType.value, startAt: Date.now() };
     btnEndBreak.disabled = false;
     btnStartBreak.disabled = true;
-    await persistActiveShift();
+    await persistCurrentDraft();
     renderBreakList();
   });
 
   btnEndBreak.addEventListener("click", async ()=>{
-    if(!activeBreak){ return; }
+    if(!activeBreak) return;
     const b = {
       id: activeBreak.id,
       shiftId: activeShift.id,
@@ -395,7 +462,7 @@
     activeBreak = null;
     btnEndBreak.disabled = true;
     btnStartBreak.disabled = false;
-    await persistActiveShift();
+    await persistCurrentDraft();
     renderBreakList();
   });
 
@@ -422,11 +489,11 @@
     b.type = editBreakType.value;
     b.startAt = s.getTime();
     b.endAt = e.getTime();
-    await persistActiveShift();
+    await persistCurrentDraft();
     renderBreakList();
   });
 
-  // ---------- Edit shift times ----------
+  // Edit shift times
   btnEditTimes.addEventListener("click", ()=>{
     if(!activeShift) return;
     editStart.value = toDTInputValue(new Date(activeShift.startAt));
@@ -445,10 +512,10 @@
     activeShift.startAt = s.getTime();
     activeShift.endAtDraft = e.getTime();
     activeSummary.innerHTML = shiftSummaryHtml(activeShift);
-    await persistActiveShift();
+    await persistCurrentDraft();
   });
 
-  // ---------- End shift and signature ----------
+  // End shift and signature
   btnEndShift.addEventListener("click", async ()=>{
     if(!activeShift) return;
     if(activeBreak){
@@ -457,66 +524,66 @@
     }
     activeShift.endAtDraft = Date.now();
     activeSummary.innerHTML = shiftSummaryHtml(activeShift);
-    await persistActiveShift();
+    await persistCurrentDraft();
     clearSignature();
     showView("sign");
     setStatus("Capture signature");
   });
 
-  btnBackToActive.addEventListener("click", async ()=>{
-    showView("active");
-  });
+  btnBackToActive.addEventListener("click", ()=>showView("active"));
 
-  // signature pad
+  // Signature pad
   const sigCtx = sigCanvas.getContext("2d");
-  let drawing = false;
-  let sigEmpty = true;
+  let drawing=false;
+  let sigEmpty=true;
 
   function clearSignature(){
     sigCtx.clearRect(0,0,sigCanvas.width,sigCanvas.height);
-    sigCtx.fillStyle = "#ffffff";
+    sigCtx.fillStyle="#ffffff";
     sigCtx.fillRect(0,0,sigCanvas.width,sigCanvas.height);
-    sigCtx.strokeStyle = "#111827";
-    sigCtx.lineWidth = 3;
-    sigCtx.lineCap = "round";
-    sigEmpty = true;
+    sigCtx.strokeStyle="#111827";
+    sigCtx.lineWidth=3;
+    sigCtx.lineCap="round";
+    sigEmpty=true;
   }
   clearSignature();
 
   function getPos(e){
-    const rect = sigCanvas.getBoundingClientRect();
-    const x = (e.clientX - rect.left) * (sigCanvas.width / rect.width);
-    const y = (e.clientY - rect.top) * (sigCanvas.height / rect.height);
+    const rect=sigCanvas.getBoundingClientRect();
+    const x=(e.clientX-rect.left)*(sigCanvas.width/rect.width);
+    const y=(e.clientY-rect.top)*(sigCanvas.height/rect.height);
     return {x,y};
   }
-
-  function pointerDown(e){
-    drawing = true;
+  sigCanvas.addEventListener("pointerdown",(e)=>{
+    sigCanvas.setPointerCapture(e.pointerId);
+    drawing=true;
     sigCtx.beginPath();
-    const p = getPos(e);
-    sigCtx.moveTo(p.x, p.y);
-    sigEmpty = false;
-  }
-  function pointerMove(e){
+    const p=getPos(e);
+    sigCtx.moveTo(p.x,p.y);
+    sigEmpty=false;
+  });
+  sigCanvas.addEventListener("pointermove",(e)=>{
     if(!drawing) return;
-    const p = getPos(e);
-    sigCtx.lineTo(p.x, p.y);
+    const p=getPos(e);
+    sigCtx.lineTo(p.x,p.y);
     sigCtx.stroke();
-  }
-  function pointerUp(){
-    drawing = false;
-  }
-
-  sigCanvas.addEventListener("pointerdown", (e)=>{ sigCanvas.setPointerCapture(e.pointerId); pointerDown(e); });
-  sigCanvas.addEventListener("pointermove", pointerMove);
-  sigCanvas.addEventListener("pointerup", pointerUp);
-  sigCanvas.addEventListener("pointercancel", pointerUp);
+  });
+  const stop=()=>{ drawing=false; };
+  sigCanvas.addEventListener("pointerup", stop);
+  sigCanvas.addEventListener("pointercancel", stop);
 
   btnClearSig.addEventListener("click", clearSignature);
 
+  function calcBreakMinutes(arr){
+    return arr.reduce((sum,b)=>sum + minsBetween(new Date(b.startAt), new Date(b.endAt)), 0);
+  }
+  function calcWorkedMinutes(startAt, endAt, arr){
+    const total = msToMins(endAt - startAt);
+    return Math.max(0, total - calcBreakMinutes(arr));
+  }
+
   btnSaveShift.addEventListener("click", async ()=>{
-    if(!activeShift) return;
-    if(!activeShift.endAtDraft){
+    if(!activeShift || !activeShift.endAtDraft){
       alert("End time is missing. Go back and end the shift.");
       return;
     }
@@ -524,7 +591,8 @@
       if(!confirm("No signature detected. Save anyway?")) return;
     }
 
-    const signatureDataUrl = sigCanvas.toDataURL("image/png");
+    const signatureDataUrl = sigEmpty ? null : sigCanvas.toDataURL("image/png");
+
     const shift = {
       id: activeShift.id,
       event: activeShift.event,
@@ -535,52 +603,47 @@
       breakMinutes: calcBreakMinutes(breaksDraft),
       workedMinutes: calcWorkedMinutes(activeShift.startAt, activeShift.endAtDraft, breaksDraft),
       notes: "",
-      signatureCaptured: sigEmpty ? false : true,
-      signatureDataUrl: sigEmpty ? null : signatureDataUrl,
+      signatureCaptured: !sigEmpty,
+      signatureDataUrl,
       createdAt: activeShift.createdAt
     };
 
-    // ensure all break objects have shiftId etc already
     await saveShiftAndBreaks(shift, breaksDraft);
 
-    // clear draft
+    // Remove from drafts
+    const drafts = await getDrafts();
+    delete drafts[currentDraftId];
+    await setDrafts(drafts);
+
+    // Clear current
+    currentDraftId = null;
     activeShift = null;
     activeBreak = null;
     breaksDraft = [];
-    await metaSet("activeShift", null);
-    await loadActiveShiftBanner();
+
+    await renderActiveHome();
     showView("new");
     setStatus("Shift saved");
     alert("Saved. Remember to export CSV after the event.");
   });
 
-  function calcBreakMinutes(breaksArr){
-    return breaksArr.reduce((sum,b)=>sum + minsBetween(new Date(b.startAt), new Date(b.endAt)), 0);
-  }
-  function calcWorkedMinutes(startAt, endAt, breaksArr){
-    const total = msToMins(endAt - startAt);
-    return Math.max(0, total - calcBreakMinutes(breaksArr));
-  }
-
-  // ---------- History ----------
+  // History
   async function renderHistory(){
-    const search = (historySearch.value||"").trim().toLowerCase();
-    const date = (historyDate.value||"").trim();
+    const search=(historySearch.value||"").trim().toLowerCase();
+    const date=(historyDate.value||"").trim();
     const shifts = await getAll("shifts");
-    const filtered = shifts
-      .filter(s=>{
-        if(date && s.date !== date) return false;
-        if(search){
-          const hay = (s.name + " " + s.event).toLowerCase();
-          if(!hay.includes(search)) return false;
-        }
-        return true;
-      })
-      .sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+    const filtered = shifts.filter(s=>{
+      if(date && s.date !== date) return false;
+      if(search){
+        const hay=(s.name+" "+s.event).toLowerCase();
+        if(!hay.includes(search)) return false;
+      }
+      return true;
+    }).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
 
-    historyList.innerHTML = "";
-    if(filtered.length === 0){
-      historyList.innerHTML = `<div class="note">No shifts found.</div>`;
+    historyList.innerHTML="";
+    if(filtered.length===0){
+      historyList.innerHTML=`<div class="note">No shifts found.</div>`;
       return;
     }
 
@@ -589,7 +652,7 @@
       div.className="item";
       const start=new Date(s.startAt);
       const end=new Date(s.endAt);
-      div.innerHTML = `
+      div.innerHTML=`
         <div class="meta">
           <div class="title">${escapeHtml(s.name)} · ${escapeHtml(s.event)}</div>
           <div class="sub">${escapeHtml(s.date)} · ${formatNice(start)} to ${formatNice(end)} · Worked ${s.workedMinutes} min</div>
@@ -602,12 +665,12 @@
     }
 
     $$("[data-detail]").forEach(btn=>{
-      btn.onclick = async ()=>{
+      btn.onclick=async ()=>{
         const id=btn.getAttribute("data-detail");
-        const shifts = await getAll("shifts");
-        const s = shifts.find(x=>x.id===id);
+        const shifts=await getAll("shifts");
+        const s=shifts.find(x=>x.id===id);
         if(!s) return;
-        const br = (await getAll("breaks")).filter(b=>b.shiftId===id).sort((a,b)=>a.startAt-b.startAt);
+        const br=(await getAll("breaks")).filter(b=>b.shiftId===id).sort((a,b)=>a.startAt-b.startAt);
         detailBody.innerHTML = renderDetailHtml(s, br);
         btnDeleteShift.dataset.shiftId = id;
         detailDialog.showModal();
@@ -618,15 +681,14 @@
   function renderDetailHtml(s, br){
     const start=new Date(s.startAt);
     const end=new Date(s.endAt);
-    const lines = [];
+    const lines=[];
     lines.push(`<div><span class="badge">${escapeHtml(s.event)}</span> <span class="badge">${escapeHtml(s.date)}</span></div>`);
     lines.push(`<div><strong>${escapeHtml(s.name)}</strong></div>`);
     lines.push(`<div class="small">Start: ${formatNice(start)}<br>End: ${formatNice(end)}</div>`);
     lines.push(`<div class="small">Break minutes: ${s.breakMinutes} · Worked minutes: ${s.workedMinutes}</div>`);
     lines.push(`<div class="divider"></div>`);
     if(br.length){
-      lines.push(`<div><strong>Breaks</strong></div>`);
-      lines.push(`<ul>`);
+      lines.push(`<div><strong>Breaks</strong></div><ul>`);
       for(const b of br){
         const mins=minsBetween(new Date(b.startAt), new Date(b.endAt));
         lines.push(`<li>${escapeHtml(b.type)}: ${formatNice(new Date(b.startAt))} to ${formatNice(new Date(b.endAt))} (${mins} min)</li>`);
@@ -642,11 +704,7 @@
 
   historySearch.addEventListener("input", ()=>renderHistory());
   historyDate.addEventListener("change", ()=>renderHistory());
-  btnHistoryClearFilters.addEventListener("click", ()=>{
-    historySearch.value="";
-    historyDate.value="";
-    renderHistory();
-  });
+  btnHistoryClearFilters.addEventListener("click", ()=>{ historySearch.value=""; historyDate.value=""; renderHistory(); });
 
   detailDialog.addEventListener("close", async ()=>{
     if(detailDialog.returnValue !== "delete") return;
@@ -659,31 +717,27 @@
     }
   });
 
-  // ---------- Export ----------
+  // Export
   btnExportShifts.addEventListener("click", async ()=>{
-    const ev = (exportEvent.value||"").trim().toLowerCase();
-    const from = (exportFrom.value||"").trim();
-    const to = (exportTo.value||"").trim();
-    const shifts = await getAll("shifts");
-    const filtered = shifts.filter(s=>{
-      if(ev && s.event.toLowerCase() !== ev) return false;
+    const ev=(exportEvent.value||"").trim().toLowerCase();
+    const from=(exportFrom.value||"").trim();
+    const to=(exportTo.value||"").trim();
+    const shifts=await getAll("shifts");
+    const filtered=shifts.filter(s=>{
+      if(ev && s.event.toLowerCase()!==ev) return false;
       if(from && s.date < from) return false;
       if(to && s.date > to) return false;
       return true;
     }).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
-    const header = ["EntryID","Event","Date","Name","ShiftStart","ShiftEnd","TotalShiftMinutes","BreakMinutes","WorkedMinutes","SignatureCaptured","CreatedAt"];
-    const rows = [header.join(",")];
+
+    const header=["EntryID","Event","Date","Name","ShiftStart","ShiftEnd","TotalShiftMinutes","BreakMinutes","WorkedMinutes","SignatureCaptured","CreatedAt"];
+    const rows=[header.join(",")];
     for(const s of filtered){
-      const start=new Date(s.startAt);
-      const end=new Date(s.endAt);
-      const total = msToMins(s.endAt - s.startAt);
+      const total=msToMins(s.endAt - s.startAt);
       rows.push([
-        s.id,
-        s.event,
-        s.date,
-        s.name,
-        start.toISOString(),
-        end.toISOString(),
+        s.id, s.event, s.date, s.name,
+        new Date(s.startAt).toISOString(),
+        new Date(s.endAt).toISOString(),
         total,
         s.breakMinutes ?? "",
         s.workedMinutes ?? "",
@@ -691,77 +745,59 @@
         new Date(s.createdAt).toISOString()
       ].map(escapeCsv).join(","));
     }
-    const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
+    const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
     downloadText(`Shifts-${stamp}.csv`, rows.join("\n"));
   });
 
   btnExportBreaks.addEventListener("click", async ()=>{
-    const ev = (exportEvent.value||"").trim().toLowerCase();
-    const from = (exportFrom.value||"").trim();
-    const to = (exportTo.value||"").trim();
-    const breaks = await getAll("breaks");
-    const filtered = breaks.filter(b=>{
-      if(ev && (b.event||"").toLowerCase() !== ev) return false;
+    const ev=(exportEvent.value||"").trim().toLowerCase();
+    const from=(exportFrom.value||"").trim();
+    const to=(exportTo.value||"").trim();
+    const breaks=await getAll("breaks");
+    const filtered=breaks.filter(b=>{
+      if(ev && (b.event||"").toLowerCase()!==ev) return false;
       if(from && b.date < from) return false;
       if(to && b.date > to) return false;
       return true;
     }).sort((a,b)=>a.startAt-b.startAt);
 
-    const header = ["EntryID","Event","Date","BreakType","BreakStart","BreakEnd","BreakMinutes"];
-    const rows = [header.join(",")];
+    const header=["EntryID","Event","Date","BreakType","BreakStart","BreakEnd","BreakMinutes"];
+    const rows=[header.join(",")];
     for(const b of filtered){
-      const mins = msToMins(b.endAt - b.startAt);
       rows.push([
-        b.shiftId,
-        b.event || "",
-        b.date,
-        b.type,
+        b.shiftId, b.event||"", b.date, b.type,
         new Date(b.startAt).toISOString(),
         new Date(b.endAt).toISOString(),
-        mins
+        msToMins(b.endAt - b.startAt)
       ].map(escapeCsv).join(","));
     }
-    const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
+    const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
     downloadText(`Breaks-${stamp}.csv`, rows.join("\n"));
   });
 
-  // ---------- Settings ----------
+  // Settings
   btnWipeAll.addEventListener("click", async ()=>{
     if(confirm("Delete ALL shifts and breaks on this iPad? This cannot be undone.")){
       await wipeAll();
-      activeShift=null; activeBreak=null; breaksDraft=[];
       await refreshAutocomplete();
-      await loadActiveShiftBanner();
+      await renderActiveHome();
       showView("new");
       setStatus("All data deleted");
       alert("All data deleted.");
     }
   });
 
-  // ---------- Init ----------
   async function init(){
     db = await openDb();
     updateOfflineBanner();
     await refreshAutocomplete();
 
-    // defaults
-    const today = new Date();
-    dateInput.value = toDateInputValue(today);
-    startInput.value = toDTInputValue(today);
-    endInput.value = "";
+    const today=new Date();
+    dateInput.value=toDateInputValue(today);
+    startInput.value=toDTInputValue(today);
+    endInput.value="";
 
-    // restore active shift draft if exists
-    const draft = await metaGet("activeShift");
-    if(draft && draft.activeShift){
-      btnResumeActive.hidden=false;
-      btnResumeActive.onclick=async ()=>{
-        activeShift = draft.activeShift;
-        activeBreak = draft.activeBreak;
-        breaksDraft = draft.breaksDraft || [];
-        await showActiveShift();
-      };
-    }
-
+    await renderActiveHome();
     showView("new");
     setStatus("Ready");
   }
