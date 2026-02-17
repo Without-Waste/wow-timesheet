@@ -107,11 +107,6 @@
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(()=>URL.revokeObjectURL(url), 800);
   }
-
-  // PWA offline
-  if("serviceWorker" in navigator){
-    navigator.serviceWorker.register("./service-worker.js").catch(()=>{});
-  }
   function updateOfflineBanner(){ offlineBanner.hidden = navigator.onLine; }
   window.addEventListener("online", updateOfflineBanner);
   window.addEventListener("offline", updateOfflineBanner);
