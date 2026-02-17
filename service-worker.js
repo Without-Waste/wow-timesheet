@@ -1,4 +1,4 @@
-const CACHE_NAME = "wow-timesheets-v3";
+const CACHE_NAME = "wow-timesheets-v4";
 const ASSETS = [
   "./",
   "./index.html",

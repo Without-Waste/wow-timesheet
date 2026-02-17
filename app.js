@@ -63,6 +63,8 @@
   const exportFrom = $("#exportFrom");
   const exportTo = $("#exportTo");
   const btnExportCombined = $("#btnExportCombined");
+  const btnExportShifts = $("#btnExportShifts");
+  const btnExportBreaks = $("#btnExportBreaks");
 
   const btnWipeAll = $("#btnWipeAll");
 
@@ -717,7 +719,8 @@
   });
 
   // Export
-  btnExportCombined.addEventListener("click", async ()=>{
+  
+  async function exportCombined(){
     const ev=(exportEvent.value||"").trim().toLowerCase();
     const from=(exportFrom.value||"").trim();
     const to=(exportTo.value||"").trim();
@@ -740,8 +743,6 @@
       return true;
     }).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
 
-    // Breaks are included as a single field so the CSV stays one-row-per-shift.
-    // Format per break: Type|StartISO|EndISO|Minutes, joined by ; 
     const header=[
       "EntryID","Event","Date","Name",
       "ShiftStart","ShiftEnd",
@@ -775,9 +776,18 @@
     }
 
     const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
-    downloadText(`Timesheets-${stamp}.csv`, rows.join("
-"));
-  });
+    downloadText(`Timesheets-${stamp}.csv`, rows.join("\n"));
+  }
+
+  // Export wiring supports both UI versions (old two-button screen and new single-button screen)
+  const exportBtn = btnExportCombined || btnExportShifts;
+  if(exportBtn){
+    exportBtn.addEventListener("click", exportCombined);
+  }
+  if(btnExportBreaks){
+    btnExportBreaks.style.display = "none";
+  }
+
 
     const header=["EntryID","Event","Date","BreakType","BreakStart","BreakEnd","BreakMinutes"];
     const rows=[header.join(",")];
