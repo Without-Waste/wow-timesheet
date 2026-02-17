@@ -62,8 +62,7 @@
   const exportEvent = $("#exportEvent");
   const exportFrom = $("#exportFrom");
   const exportTo = $("#exportTo");
-  const btnExportShifts = $("#btnExportShifts");
-  const btnExportBreaks = $("#btnExportBreaks");
+  const btnExportCombined = $("#btnExportCombined");
 
   const btnWipeAll = $("#btnWipeAll");
 
@@ -718,11 +717,22 @@
   });
 
   // Export
-  btnExportShifts.addEventListener("click", async ()=>{
+  btnExportCombined.addEventListener("click", async ()=>{
     const ev=(exportEvent.value||"").trim().toLowerCase();
     const from=(exportFrom.value||"").trim();
     const to=(exportTo.value||"").trim();
-    const shifts=await getAll("shifts");
+
+    const [shifts, breaks] = await Promise.all([getAll("shifts"), getAll("breaks")]);
+
+    const breaksByShift = new Map();
+    for(const b of breaks){
+      if(!breaksByShift.has(b.shiftId)) breaksByShift.set(b.shiftId, []);
+      breaksByShift.get(b.shiftId).push(b);
+    }
+    for(const arr of breaksByShift.values()){
+      arr.sort((a,b)=>a.startAt-b.startAt);
+    }
+
     const filtered=shifts.filter(s=>{
       if(ev && s.event.toLowerCase()!==ev) return false;
       if(from && s.date < from) return false;
@@ -730,10 +740,26 @@
       return true;
     }).sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
 
-    const header=["EntryID","Event","Date","Name","ShiftStart","ShiftEnd","TotalShiftMinutes","BreakMinutes","WorkedMinutes","SignatureCaptured","CreatedAt"];
+    // Breaks are included as a single field so the CSV stays one-row-per-shift.
+    // Format per break: Type|StartISO|EndISO|Minutes, joined by ; 
+    const header=[
+      "EntryID","Event","Date","Name",
+      "ShiftStart","ShiftEnd",
+      "TotalShiftMinutes","BreakMinutes","WorkedMinutes",
+      "BreakCount","Breaks",
+      "SignatureCaptured","CreatedAt"
+    ];
     const rows=[header.join(",")];
+
     for(const s of filtered){
       const total=msToMins(s.endAt - s.startAt);
+      const br = breaksByShift.get(s.id) || [];
+      const breakCount = br.length;
+      const breaksField = br.map(b=>{
+        const mins = msToMins(b.endAt - b.startAt);
+        return `${b.type}|${new Date(b.startAt).toISOString()}|${new Date(b.endAt).toISOString()}|${mins}`;
+      }).join("; ");
+
       rows.push([
         s.id, s.event, s.date, s.name,
         new Date(s.startAt).toISOString(),
@@ -741,25 +767,17 @@
         total,
         s.breakMinutes ?? "",
         s.workedMinutes ?? "",
+        breakCount,
+        breaksField,
         s.signatureCaptured ? "Yes" : "No",
         new Date(s.createdAt).toISOString()
       ].map(escapeCsv).join(","));
     }
-    const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
-    downloadText(`Shifts-${stamp}.csv`, rows.join("\n"));
-  });
 
-  btnExportBreaks.addEventListener("click", async ()=>{
-    const ev=(exportEvent.value||"").trim().toLowerCase();
-    const from=(exportFrom.value||"").trim();
-    const to=(exportTo.value||"").trim();
-    const breaks=await getAll("breaks");
-    const filtered=breaks.filter(b=>{
-      if(ev && (b.event||"").toLowerCase()!==ev) return false;
-      if(from && b.date < from) return false;
-      if(to && b.date > to) return false;
-      return true;
-    }).sort((a,b)=>a.startAt-b.startAt);
+    const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
+    downloadText(`Timesheets-${stamp}.csv`, rows.join("
+"));
+  });
 
     const header=["EntryID","Event","Date","BreakType","BreakStart","BreakEnd","BreakMinutes"];
     const rows=[header.join(",")];
