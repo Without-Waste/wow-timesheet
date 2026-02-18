@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WOW Staff Timesheet</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="header">
+    <div class="brand">WOW</div>
+    <h1>WOW Staff Timesheet</h1>
+    <p class="muted">One shared device. Multiple active shifts. Breaks are fixed minutes (add instantly). Signature at end. Export CSV + signatures.</p>
+
+    <nav class="tabs" aria-label="Views">
+      <button class="tab active" id="tabActive" type="button">Active</button>
+      <button class="tab" id="tabHistory" type="button">History</button>
+      <button class="tab" id="tabExport" type="button">Export</button>
+    </nav>
+  </header>
+
+  <main class="container">
+    <!-- ACTIVE -->
+    <section id="viewActive">
+      <section class="card">
+        <h2>Start a new shift</h2>
+
+        <div class="grid">
+          <label class="field">
+            <span>Event name</span>
+            <input id="eventName" placeholder="e.g. Sparks in the Park" autocomplete="off">
+          </label>
+
+          <label class="field">
+            <span>Staff name</span>
+            <input id="staffName" placeholder="e.g. Kate" autocomplete="off">
+          </label>
+
+          <label class="field">
+            <span>Date</span>
+            <input id="shiftDate" type="date">
+          </label>
+
+          <label class="field">
+            <span>Start time (nearest quarter hour)</span>
+            <input id="shiftStart" type="time">
+          </label>
+        </div>
+
+        <div class="actions">
+          <button id="startShift" class="btn primary" type="button">Start shift</button>
+          <button id="clearInputs" class="btn" type="button">Clear</button>
+        </div>
+
+        <p class="hint">Start time defaults to the closest quarter hour. You can edit it before starting.</p>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <h2>Active shifts</h2>
+          <span id="activeCount" class="pill">0</span>
+        </div>
+        <div id="activeShifts" class="stack"></div>
+        <p id="noActive" class="muted">No active shifts yet.</p>
+      </section>
+    </section>
+
+    <!-- HISTORY -->
+    <section id="viewHistory" hidden>
+      <section class="card">
+        <div class="row">
+          <h2>History</h2>
+          <span id="historyCount" class="pill">0</span>
+        </div>
+
+        <div class="grid export-grid">
+          <label class="field">
+            <span>Search (name or event)</span>
+            <input id="historySearch" placeholder="type to filter">
+          </label>
+          <label class="field">
+            <span>Date (optional)</span>
+            <input id="historyDate" type="date">
+          </label>
+          <div class="actions" style="align-self:end; margin:0">
+            <button id="historyClear" class="btn" type="button">Clear filters</button>
+          </div>
+        </div>
+
+        <div id="historyList" class="stack" style="margin-top:14px"></div>
+        <p id="noHistory" class="muted">No completed shifts yet.</p>
+      </section>
+    </section>
+
+    <!-- EXPORT -->
+    <section id="viewExport" hidden>
+      <section class="card">
+        <h2>Export</h2>
+        <div class="grid export-grid">
+          <label class="field">
+            <span>Event filter (optional)</span>
+            <input id="exportEvent" placeholder="leave blank for all">
+          </label>
+          <label class="field">
+            <span>From (optional)</span>
+            <input id="exportFrom" type="date">
+          </label>
+          <label class="field">
+            <span>To (optional)</span>
+            <input id="exportTo" type="date">
+          </label>
+        </div>
+        <div class="actions">
+          <button id="exportCSV" class="btn primary" type="button">Export Timesheets.csv</button>
+          <button id="exportSignatures" class="btn ok" type="button">Export Signatures PNG</button>
+        </div>
+        <p class="hint">Exports include completed shifts only. Signature image stays on device; the signatures export creates a combined PNG document.</p>
+      </section>
+    </section>
+  </main>
+
+  <footer class="footer muted">
+    <small>Data is stored on this device only. Export after each event.</small>
+  </footer>
+
+  <!-- SIGNATURE MODAL -->
+  <dialog id="sigDialog" class="modal">
+    <div class="modalBody">
+      <h3 style="margin:0 0 8px">End shift + signature</h3>
+      <p class="muted" style="margin:0 0 12px">Adjust the end time if needed, then have the staff member sign and save.</p>
+
+      <div class="grid" style="margin: 10px 0 12px">
+        <label class="field">
+          <span>End time</span>
+          <input id="sigEndTime" type="time">
+        </label>
+      </div>
+
+      <div class="sigWrap">
+        <canvas id="sigCanvas" width="900" height="260"></canvas>
+      </div>
+
+      <div class="actions">
+        <button id="sigClear" class="btn" type="button">Clear</button>
+        <button id="sigCancel" class="btn" type="button">Cancel (no signature)</button>
+        <button id="sigSave" class="btn primary" type="button">Save signature</button>
+      </div>
+      <p class="hint">Tip: finger or Apple Pencil. If no signature, use Cancel.</p>
+    </div>
+  </dialog>
+
+  <!-- DETAIL MODAL -->
+  <dialog id="detailDialog" class="modal">
+    <div class="modalBody">
+      <h3 style="margin:0 0 8px">Shift details</h3>
+      <div id="detailBody" class="detail"></div>
+      <div class="actions">
+        <button id="detailClose" class="btn" type="button">Close</button>
+        <button id="detailSave" class="btn primary" type="button">Save edits</button>
+        <button id="detailDownloadSig" class="btn ok" type="button">Download signature PNG</button>
+        <button id="detailDelete" class="btn danger" type="button">Delete shift</button>
+      </div>
+      <p class="hint">Edits update history and exports. Deleting removes this shift from history and exports (cannot be undone).</p>
+    </div>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
